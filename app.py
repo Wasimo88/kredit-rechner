@@ -1,60 +1,44 @@
 import streamlit as st
 import math
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List
 from fpdf import FPDF
 
-# --- 1. KONFIGURATION & BANK-REGELWERK ---
+# --- 1. KONFIGURATION & LOGIK ---
+
 class BankPolicy:
-    # Aktuelle Marktzinsen (Simuliert)
-    BASE_RATE_CONSUMER = 3.9   # Konsumkredit Basis
-    BASE_RATE_MORTGAGE = 3.5   # Immobilienkredit Basis
-    
-    # Maximale Verschuldungsquote (Rate darf max X% vom Netto sein)
-    MAX_DTI_PERCENT = 40.0 
-    
-    # Pauschalen (Banken nutzen oft 60% des Einkommens für Lebenshaltung, aber mit Mindestsätzen)
+    # Pauschalen (Banken-Standard)
     MIN_LIVING_COST_ADULT = 850.0
     MIN_LIVING_COST_PARTNER = 450.0
-    MIN_LIVING_COST_CHILD = 350.0 # Orientierung Düsseldorfer Tabelle
+    MIN_LIVING_COST_CHILD = 350.0 
+    MAX_DTI_PERCENT = 40.0 
 
     @staticmethod
     def get_dynamic_living_costs(net_income_household: float, has_partner: bool, children: int) -> float:
-        """
-        Banken-Logik: Wer viel verdient, hat höhere Ansprüche.
-        Wir setzen hier eine dynamische Pauschale an, die mit dem Einkommen steigt,
-        aber mindestens die festen Sätze abdeckt.
-        """
-        # Basisbedarf berechnen
+        # Basisbedarf
         base_need = BankPolicy.MIN_LIVING_COST_ADULT
         if has_partner:
             base_need += BankPolicy.MIN_LIVING_COST_PARTNER
         base_need += (children * BankPolicy.MIN_LIVING_COST_CHILD)
         
-        # Dynamischer Ansatz: Banken nehmen oft an, dass die Lebenshaltungskosten
-        # mit dem Einkommen steigen (Lifestyle). Wir nehmen das Maximum aus Basisbedarf
-        # ODER 35% des Haushaltseinkommens (damit reiche Kunden nicht "zu reich" gerechnet werden).
+        # Lifestyle-Pauschale: Wer mehr verdient, gibt mehr aus (max 35% vom Netto)
         dynamic_need = net_income_household * 0.35
-        
         return max(base_need, dynamic_need)
 
-# --- 2. DATENSTRUKTUREN ---
 @dataclass
 class CustomerData:
     net_income: float
-    partner_income: float = 0.0 # WICHTIG: Volles Einkommen des Partners
+    partner_income: float = 0.0
     rental_income: float = 0.0
     other_income: float = 0.0
-    
     rent_warm: float = 0.0
     mortgage_payment: float = 0.0
     existing_loans: float = 0.0
     savings_rate: float = 0.0
-    
     has_partner: bool = False
     children_count: int = 0
-    employment_status: str = "fest" # fest, befristet, probezeit, selbststaendig
-    schufa_clean: bool = True       # Keine negativen Einträge
+    employment_status: str = "fest"
+    schufa_clean: bool = True
 
 @dataclass
 class LoanResult:
@@ -67,261 +51,265 @@ class LoanResult:
     disposable_income: float = 0.0
     dti_ratio: float = 0.0
 
-# --- 3. RECHENKERN (CORE BANKING LOGIC) ---
+class FinancialMath:
+    @staticmethod
+    def calculate_rate(amount, years, interest_percent):
+        if interest_percent == 0: return amount / (years * 12)
+        r_monthly = (interest_percent / 100) / 12
+        months = years * 12
+        factor = (1 + r_monthly) ** months
+        return amount * (r_monthly * factor) / (factor - 1)
+
+    @staticmethod
+    def calculate_max_loan(target_rate, years, interest_percent):
+        if interest_percent == 0: return target_rate * years * 12
+        r_monthly = (interest_percent / 100) / 12
+        months = years * 12
+        factor = (1 + r_monthly) ** months
+        return target_rate * ((factor - 1) / (r_monthly * factor))
+
 class CreditDecisionEngine:
-    
     @staticmethod
     def check_hard_knockouts(c: CustomerData, amount: float) -> List[str]:
-        """Prüft K.O.-Kriterien VOR der Berechnung"""
         errors = []
         if not c.schufa_clean:
-            errors.append("ABTEILUNG RISIKO: Negative Schufa-Merkmale führen zur sofortigen Ablehnung.")
-        
+            errors.append("POLICY: Negative Schufa-Merkmale.")
         if c.employment_status == "probezeit" and amount > 5000:
-            errors.append("POLICY: In der Probezeit sind maximal 5.000 € möglich.")
-            
-        if c.net_income < 1300 and not c.has_partner:
-            errors.append("POLICY: Einkommen liegt unter der Pfändungsfreigrenze (ca. 1.400€). Kreditvergabe risikoreich.")
-            
+            errors.append("POLICY: In Probezeit max. 5.000 €.")
         return errors
 
     @staticmethod
     def calculate_affordability(c: CustomerData) -> dict:
-        """Erstellt die Haushaltsrechnung (Kapitaldienstfähigkeit)"""
-        # 1. Einnahmen
-        # Mieteinnahmen werden pauschal um 20% gekürzt (Bewirtschaftungskosten)
+        # Mieteinnahmen pauschal 80%
         adj_rental = c.rental_income * 0.80
         total_income = c.net_income + c.partner_income + adj_rental + c.other_income
         
-        # 2. Ausgaben (Dynamische Lebenshaltungskosten)
         living_costs = BankPolicy.get_dynamic_living_costs(total_income, c.has_partner, c.children_count)
         
-        # 3. Fixkosten
         housing_cost = c.rent_warm + c.mortgage_payment
         liabilities = c.existing_loans + c.savings_rate
-        
         total_expenses = living_costs + housing_cost + liabilities
-        
-        # 4. Freies Budget
-        disposable = total_income - total_expenses
         
         return {
             "income": total_income,
             "expenses": total_expenses,
-            "disposable": round(disposable, 2),
+            "disposable": round(total_income - total_expenses, 2),
             "living_costs_assumed": round(living_costs, 2)
         }
 
     @staticmethod
-    def calculate_loan(c: CustomerData, amount: float, months: int) -> LoanResult:
+    def calculate_loan(c: CustomerData, amount: float, months: int, base_interest: float) -> LoanResult:
         messages = []
-        
-        # A. K.O. Prüfung
         ko_errors = CreditDecisionEngine.check_hard_knockouts(c, amount)
         if ko_errors:
             return LoanResult(False, 0, 0, 0, 0, ko_errors)
 
-        # B. Bonitäts-Zins ermitteln (Risk Pricing)
-        interest_rate = BankPolicy.BASE_RATE_CONSUMER
-        
-        # Zinsaufschläge
+        # Zinssatz ermitteln (Basis + Risikoaufschlag)
+        interest_rate = base_interest
         if c.employment_status == "befristet": interest_rate += 1.5
         if c.employment_status == "selbststaendig": interest_rate += 2.0
+        if months > 84: interest_rate += 0.5 # Laufzeitaufschlag
         
-        # Laufzeitaufschlag (Zinsstrukturkurve simulieren: Längere Laufzeit = teurer)
-        if months > 60: interest_rate += 0.4
-        if months > 84: interest_rate += 0.8
+        interest_rate = round(interest_rate, 2)
         
-        # C. Rate berechnen
-        r_monthly = (interest_rate / 100) / 12
-        rate = amount * (r_monthly * (1 + r_monthly)**months) / ((1 + r_monthly)**months - 1)
+        # Rate berechnen
+        rate = FinancialMath.calculate_rate(amount, months/12, interest_rate)
         rate = round(rate, 2)
         
-        # D. Haushaltsprüfung
+        # Prüfungen
         budget = CreditDecisionEngine.calculate_affordability(c)
         disposable = budget["disposable"]
-        
-        # E. DTI Prüfung (Debt to Income)
-        # Darf die Rate X% des Nettoeinkommens übersteigen?
         household_net = c.net_income + c.partner_income
-        dti_current = (rate / household_net) * 100
+        dti_current = (rate / household_net) * 100 if household_net > 0 else 0
         
-        is_approved = True
-        
+        is_possible = True
         if disposable < rate:
-            is_approved = False
-            messages.append(f"ABLEHNUNG: Rate ({rate}€) ist höher als frei verfügbares Einkommen ({disposable}€).")
-            
+            is_possible = False
+            messages.append(f"NEGATIV: Rate ({rate}€) höher als freies Budget ({disposable}€).")
         if dti_current > BankPolicy.MAX_DTI_PERCENT:
-            is_approved = False
-            messages.append(f"RISIKO: Die Rate entspricht {dti_current:.1f}% Ihres Einkommens. Erlaubt sind max. {BankPolicy.MAX_DTI_PERCENT}%.")
+            is_possible = False
+            messages.append(f"RISIKO: DTI Quote zu hoch ({dti_current:.1f}%).")
 
         total_repay = rate * months
         
         return LoanResult(
-            approved=is_approved,
+            approved=is_possible,
             max_loan_amount=amount,
             monthly_rate=rate,
-            interest_rate=round(interest_rate, 2),
+            interest_rate=interest_rate,
             total_repayment=round(total_repay, 2),
             messages=messages,
             disposable_income=disposable,
             dti_ratio=dti_current
         )
 
-# --- 4. PDF ENGINE ---
+# --- 2. PDF ENGINE ---
 class BankPDF(FPDF):
     def header(self):
         self.set_font('Helvetica', 'B', 16)
-        self.cell(0, 10, 'KREDITANFRAGE - PRÜFPROTOKOLL', 0, 1, 'C')
+        self.cell(0, 10, 'FINANZIERUNGS-PRÜFUNG', 0, 1, 'C')
         self.ln(5)
 
     def create_report(self, res: LoanResult, c: CustomerData, amount, months):
         self.add_page()
         self.set_font('Helvetica', '', 11)
-        
         self.cell(0, 8, f"Kreditsumme: {amount:,.2f} EUR | Laufzeit: {months} Monate", 0, 1)
         self.ln(5)
         
-        # Status Box
         self.set_font('Helvetica', 'B', 14)
-        status = "GENEHMIGT" if res.approved else "ABGELEHNT"
+        status = "FINANZIERUNG MÖGLICH" if res.approved else "NICHT MÖGLICH"
         color = (0, 150, 0) if res.approved else (200, 0, 0)
         self.set_text_color(*color)
-        self.cell(0, 10, f"STATUS: {status}", 0, 1)
+        self.cell(0, 10, f"ERGEBNIS: {status}", 0, 1)
         self.set_text_color(0,0,0)
         self.ln(5)
         
-        # Details
         self.set_font('Helvetica', '', 11)
         self.cell(95, 8, f"Monatliche Rate: {res.monthly_rate:,.2f} EUR")
-        self.cell(95, 8, f"Zinssatz (eff. ca): {res.interest_rate} %", 0, 1)
+        self.cell(95, 8, f"Kalkulierter Zins: {res.interest_rate} %", 0, 1)
         self.cell(95, 8, f"Gesamtrückzahlung: {res.total_repayment:,.2f} EUR")
-        self.cell(95, 8, f"Zinskosten: {res.total_repayment - amount:,.2f} EUR", 0, 1)
         self.ln(5)
         
         self.set_font('Helvetica', 'B', 11)
-        self.cell(0, 8, "Haushaltsrechnung (Interne Bankdaten):", 0, 1)
+        self.cell(0, 8, "Details zur Haushaltsrechnung:", 0, 1)
         self.set_font('Helvetica', '', 10)
-        
-        # Haushaltstabelle
         budget = CreditDecisionEngine.calculate_affordability(c)
-        self.cell(100, 6, f"Gesamteinkommen Haushalt:", 0, 0)
+        self.cell(100, 6, f"Haushalts-Einkommen (angerechnet):", 0, 0)
         self.cell(50, 6, f"{budget['income']:,.2f} EUR", 0, 1, 'R')
+        self.cell(100, 6, f"Frei verfügbar:", 0, 0)
+        self.cell(50, 6, f"{res.disposable_income:,.2f} EUR", 0, 1, 'R')
         
-        self.cell(100, 6, f"Angesetzte Lebenshaltung (Pauschale + Lifestyle):", 0, 0)
-        self.cell(50, 6, f"- {budget['living_costs_assumed']:,.2f} EUR", 0, 1, 'R')
-        
-        self.cell(100, 6, f"Wohnkosten & Verpflichtungen:", 0, 0)
-        self.cell(50, 6, f"- {budget['expenses'] - budget['living_costs_assumed']:,.2f} EUR", 0, 1, 'R')
-        
-        self.set_font('Helvetica', 'B', 10)
-        self.cell(100, 8, f"Frei verfügbar (Kapitaldienstgrenze):", "T", 0)
-        self.cell(50, 8, f"{res.disposable_income:,.2f} EUR", "T", 1, 'R')
-        
-        self.ln(5)
-        if res.messages:
-            self.set_text_color(200, 0, 0)
-            self.cell(0, 8, "Meldungen / Ablehnungsgründe:", 0, 1)
-            self.set_font('Helvetica', '', 9)
-            for msg in res.messages:
-                self.multi_cell(0, 5, f"- {msg}")
-                
         return bytes(self.output())
 
-# --- 5. FRONTEND (STREAMLIT) ---
+# --- 3. FRONTEND (STREAMLIT) ---
 def main():
-    st.set_page_config(page_title="Bank Rating Tool", page_icon="🏦")
-    st.title("🏦 Bank Rating Tool v2.0")
-    st.caption("Professionelle Kapitaldienstfähigkeitsrechnung nach Bankstandards")
+    st.set_page_config(page_title="Finanz-Suite V3", page_icon="💶")
+    st.title("💶 Finanz-Suite")
 
-    # --- EINGABE MASKE ---
-    with st.expander("👤 1. Persönliche Daten & Haushalt", expanded=True):
-        col1, col2 = st.columns(2)
-        net_income = col1.number_input("Dein Nettoeinkommen (€)", 2500, step=50)
-        
-        has_partner = col2.checkbox("Partner im Haushalt?")
-        partner_income = 0.0
-        if has_partner:
-            partner_income = col2.number_input("Nettoeinkommen Partner (€)", 0, step=50)
-            st.success(f"Haushalts-Netto: {net_income + partner_income:,.2f} €")
-        
-        kids = st.slider("Kinder im Haushalt", 0, 5, 0)
-        
-        c3, c4 = st.columns(2)
-        emp_status = c3.selectbox("Arbeitsverhältnis", ["fest", "befristet", "probezeit", "selbststaendig"])
-        schufa = c4.toggle("Schufa/Bonität einwandfrei?", value=True)
-        if not schufa:
-            st.error("Achtung: Negative Schufa führt meist zur direkten Ablehnung.")
+    # HAUPT-NAVIGATION
+    tab_simple, tab_pro = st.tabs(["🔢 Einfacher Rechner", "🏦 Profi Bank-Check"])
 
-    with st.expander("💰 2. Finanzielle Situation (Monatlich)", expanded=False):
-        c1, c2 = st.columns(2)
-        # Einnahmen
-        rental = c1.number_input("Mieteinnahmen (Kalt)", 0, step=50)
-        other_inc = c1.number_input("Sonstige Einnahmen (Kindergeld etc.)", 0, step=50)
+    # ---------------------------------------------------------
+    # TAB 1: EINFACHER RECHNER (Die "Allrounder" Funktion)
+    # ---------------------------------------------------------
+    with tab_simple:
+        st.subheader("Schnell-Kalkulation")
+        calc_mode = st.radio("Was berechnen?", ["Ich habe eine Summe", "Ich habe eine Wunschrate"], horizontal=True)
         
-        # Ausgaben
-        rent_warm = c2.number_input("Aktuelle Warmmiete (fällt weg bei Hauskauf?)", 800, step=50)
-        mortgage = c2.number_input("Bestehende Kreditraten Immobilien", 0, step=50)
-        loans = c2.number_input("Bestehende Ratenkredite (Auto etc.)", 0, step=50)
-        savings = c2.number_input("Feste Sparrate (die weiterlaufen soll)", 0, step=50)
-
-    with st.expander("📊 3. Kreditwunsch", expanded=True):
-        cw1, cw2 = st.columns(2)
-        amount = cw1.number_input("Kreditsumme (€)", 20000, step=1000)
-        years = cw2.slider("Laufzeit (Jahre)", 1, 20, 5)
-        months = years * 12
-
-    # --- BERECHNUNG ---
-    if st.button("Bonität prüfen & Berechnen", type="primary"):
-        # Daten Objekt bauen
-        customer = CustomerData(
-            net_income=net_income, partner_income=partner_income,
-            rental_income=rental, other_income=other_inc,
-            rent_warm=rent_warm, mortgage_payment=mortgage,
-            existing_loans=loans, savings_rate=savings,
-            has_partner=has_partner, children_count=kids,
-            employment_status=emp_status, schufa_clean=schufa
-        )
+        c1, c2, c3 = st.columns(3)
         
-        # Engine anwerfen
-        result = CreditDecisionEngine.calculate_loan(customer, amount, months)
+        amount_input = 0.0
+        rate_input = 0.0
         
-        st.divider()
+        if calc_mode == "Ich habe eine Summe":
+            amount_input = c1.number_input("Kreditbetrag (€)", 10000, step=1000)
+        else:
+            rate_input = c1.number_input("Wunschrate (€)", 300, step=50)
+            
+        years_simple = c2.number_input("Laufzeit (Jahre)", 1, 30, 5)
+        interest_simple = c3.number_input("Zinssatz (%)", value=4.5, step=0.1)
         
-        # Ergebnis Darstellung
-        c_res1, c_res2 = st.columns([2, 1])
-        
-        with c_res1:
-            if result.approved:
-                st.subheader("✅ KREDIT GENEHMIGT")
-                st.metric("Monatliche Rate", f"{result.monthly_rate:,.2f} €")
-                st.caption(f"Zinssatz: {result.interest_rate}% | Gesamtkosten: {result.total_repayment:,.2f} €")
+        if st.button("Rechnen", type="primary", key="btn_simple"):
+            st.divider()
+            col_res1, col_res2 = st.columns(2)
+            
+            if calc_mode == "Ich habe eine Summe":
+                # Wir suchen die Rate
+                rate_res = FinancialMath.calculate_rate(amount_input, years_simple, interest_simple)
+                total_res = rate_res * years_simple * 12
+                interest_cost = total_res - amount_input
+                
+                col_res1.metric("Monatliche Rate", f"{rate_res:,.2f} €")
+                col_res2.metric("Gesamtkosten", f"{total_res:,.2f} €", delta=f"davon {interest_cost:,.2f} € Zinsen", delta_color="inverse")
             else:
-                st.subheader("🚫 KREDIT ABGELEHNT")
-                st.error("Die Kriterien der Bank wurden nicht erfüllt.")
+                # Wir suchen die Summe
+                loan_res = FinancialMath.calculate_max_loan(rate_input, years_simple, interest_simple)
+                total_res = rate_input * years_simple * 12
+                interest_cost = total_res - loan_res
+                
+                col_res1.metric("Mögliche Kreditsumme", f"{loan_res:,.2f} €")
+                col_res2.metric("Gesamtrückzahlung", f"{total_res:,.2f} €", delta=f"Kosten: {interest_cost:,.2f} €", delta_color="inverse")
+
+    # ---------------------------------------------------------
+    # TAB 2: PROFI BANK-CHECK (Die detaillierte Prüfung)
+    # ---------------------------------------------------------
+    with tab_pro:
+        st.caption("Detaillierte Prüfung der Bonität und Haushaltsrechnung")
         
-        with c_res2:
-            st.write("**Budget-Check:**")
-            st.write(f"Frei: {result.disposable_income:,.2f} €")
-            st.write(f"Belastung: {result.dti_ratio:.1f}% vom Netto")
-            if result.dti_ratio > 40:
-                st.caption("⚠️ Belastung zu hoch (>40%)")
+        with st.expander("👤 1. Haushalt & Einkommen", expanded=True):
+            col1, col2 = st.columns(2)
+            net_income = col1.number_input("Dein Nettoeinkommen (€)", 2500, step=50, key="p_net")
+            has_partner = col2.checkbox("Partner im Haushalt?", key="p_has_part")
+            partner_income = 0.0
+            if has_partner:
+                partner_income = col2.number_input("Netto Partner (€)", 0, step=50, key="p_part_inc")
+                st.success(f"Haushalts-Netto: {net_income + partner_income:,.2f} €")
+            kids = st.slider("Kinder", 0, 5, 0, key="p_kids")
+            
+            c3, c4 = st.columns(2)
+            emp_status = c3.selectbox("Status", ["fest", "befristet", "probezeit", "selbststaendig"], key="p_stat")
+            schufa = c4.toggle("Schufa sauber?", value=True, key="p_schufa")
 
-        # Detaillierte Meldungen
-        if result.messages:
-            with st.container(border=True):
-                st.write("**Analyse-Protokoll:**")
-                for msg in result.messages:
-                    if "ABLEHNUNG" in msg or "RISIKO" in msg or "POLICY" in msg:
-                        st.write(f"❌ {msg}")
-                    else:
-                        st.write(f"ℹ️ {msg}")
+        with st.expander("💰 2. Ausgaben & Verbindlichkeiten", expanded=False):
+            c1, c2 = st.columns(2)
+            rental = c1.number_input("Mieteinnahmen (Kalt)", 0, step=50, key="p_rent_in")
+            other_inc = c1.number_input("Sonstige Einnahmen", 0, step=50, key="p_other")
+            rent_warm = c2.number_input("Aktuelle Warmmiete", 800, step=50, key="p_rent_out")
+            mortgage = c2.number_input("Kreditraten Immo", 0, step=50, key="p_mort")
+            loans = c2.number_input("Ratenkredite (Auto)", 0, step=50, key="p_loan")
+            savings = c2.number_input("Feste Sparrate", 0, step=50, key="p_save")
 
-        # PDF Download
-        pdf = BankPDF()
-        pdf_data = pdf.create_report(result, customer, amount, months)
-        st.download_button("📄 Prüfprotokoll herunterladen (PDF)", data=pdf_data, file_name="Bank_Prufung.pdf", mime="application/pdf")
+        with st.expander("📊 3. Kreditwunsch & Markt", expanded=True):
+            cw1, cw2, cw3 = st.columns(3)
+            amount = cw1.number_input("Kreditsumme (€)", 50000, step=1000, key="p_amt")
+            years = cw2.slider("Laufzeit (Jahre)", 1, 25, 10, key="p_yrs")
+            # NEU: Variabler Zins
+            base_interest = cw3.number_input("Basis-Zins aktuell (%)", value=4.0, step=0.1, help="Aktueller Marktzins, auf den Risikozuschläge addiert werden.")
+
+        if st.button("Bonität prüfen", type="primary", key="btn_pro"):
+            customer = CustomerData(
+                net_income=net_income, partner_income=partner_income,
+                rental_income=rental, other_income=other_inc,
+                rent_warm=rent_warm, mortgage_payment=mortgage,
+                existing_loans=loans, savings_rate=savings,
+                has_partner=has_partner, children_count=kids,
+                employment_status=emp_status, schufa_clean=schufa
+            )
+            
+            # Hier übergeben wir den variablen Zins an die Engine
+            result = CreditDecisionEngine.calculate_loan(customer, amount, years*12, base_interest)
+            
+            st.divider()
+            c_res1, c_res2 = st.columns([2, 1])
+            
+            with c_res1:
+                # Wording angepasst
+                if result.approved:
+                    st.subheader("✅ FINANZIERUNG MÖGLICH")
+                    st.metric("Kalkulierte Rate", f"{result.monthly_rate:,.2f} €")
+                    st.caption(f"Zinssatz (Indikativ): {result.interest_rate}% (Basis {base_interest}% + Risiko)")
+                else:
+                    st.subheader("⚠️ KRITISCH / NICHT MÖGLICH")
+                    st.error("Kriterien der Bank-Logik nicht erfüllt.")
+            
+            with c_res2:
+                st.write("**Budget-Check:**")
+                st.write(f"Frei: {result.disposable_income:,.2f} €")
+                st.write(f"DTI: {result.dti_ratio:.1f}%")
+                if result.dti_ratio > 40:
+                    st.caption("⚠️ Quote > 40%")
+
+            if result.messages:
+                with st.container(border=True):
+                    for msg in result.messages:
+                        if "NEGATIV" in msg or "RISIKO" in msg or "POLICY" in msg:
+                            st.write(f"❌ {msg}")
+                        else:
+                            st.write(f"ℹ️ {msg}")
+
+            pdf = BankPDF()
+            pdf_data = pdf.create_report(result, customer, amount, years*12)
+            st.download_button("📄 Prüfprotokoll (PDF)", data=pdf_data, file_name="Finanzpruefung.pdf", mime="application/pdf")
 
 if __name__ == "__main__":
     main()
