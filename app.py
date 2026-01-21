@@ -8,11 +8,11 @@ from fpdf import FPDF
 from datetime import datetime
 
 # --- 0. SETUP & PASSWORT ---
-APP_NAME = "Finanz-Suite Pro" # Name für Dateispeicherung
+APP_NAME = "Finanz-Suite Pro"
 
 st.set_page_config(page_title=APP_NAME, page_icon="⚖️")
 
-# Versuch, Passwort aus Secrets zu laden
+# Passwort aus Secrets laden
 try:
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
 except Exception:
@@ -122,16 +122,24 @@ class CreditDecisionEngine:
         }
 
     @staticmethod
-    def calculate_loan(c: CustomerData, amount: float, months: int, base_interest: float) -> LoanResult:
+    def calculate_loan(c: CustomerData, amount: float, months: int, base_interest: float, use_scoring: bool) -> LoanResult:
         messages = []
         ko_errors = CreditDecisionEngine.check_hard_knockouts(c, amount)
         if ko_errors:
             return LoanResult(False, 0, 0, 0, 0, ko_errors)
 
+        # ZINS LOGIK MIT SCHALTER
         interest_rate = base_interest
-        if c.employment_status == "befristet": interest_rate += 1.5
-        if c.employment_status == "selbststaendig": interest_rate += 2.0
-        if months > 84: interest_rate += 0.5 
+        
+        if use_scoring:
+            # Nur wenn Schalter AN ist, werden Aufschläge berechnet
+            if c.employment_status == "befristet": interest_rate += 1.5
+            if c.employment_status == "selbststaendig": interest_rate += 2.0
+            if months > 84: interest_rate += 0.5 
+            messages.append("Hinweis: Automatisches Bank-Scoring aktiv (Zinsaufschläge wurden berechnet).")
+        else:
+            messages.append("Hinweis: Fixer Zinssatz (Keine Risikoaufschläge).")
+
         interest_rate = round(interest_rate, 2)
         
         rate = FinancialMath.calculate_rate(amount, months/12, interest_rate)
@@ -166,10 +174,8 @@ class CreditDecisionEngine:
 # --- 2. PROFESSIONELLES PDF ---
 class ProfessionalPDF(FPDF):
     def header(self):
-        # Titelzeile
         self.set_font('Helvetica', 'B', 18)
         self.cell(0, 10, 'FINANZIERUNGS-ERMITTLUNG', 0, 1, 'L')
-        # Linie
         self.set_draw_color(100, 100, 100)
         self.set_line_width(0.5)
         self.line(10, 22, 200, 22)
@@ -197,50 +203,43 @@ class ProfessionalPDF(FPDF):
     def create_report(self, res: LoanResult, c: CustomerData, amount, months):
         self.add_page()
         
-        # 1. Kopfdaten
         self.set_font('Helvetica', '', 11)
         self.cell(0, 6, f"Kunde / Projekt: {c.project_name}", 0, 1)
         self.cell(0, 6, f"Datum: {datetime.now().strftime('%d.%m.%Y')}", 0, 1)
         self.ln(8)
         
-        # 2. Kreditwunsch
         self.chapter_title("1. KREDITANFRAGE")
         self.chapter_row("Gewünschter Nettokreditbetrag:", f"{amount:,.2f} EUR")
         self.chapter_row("Gewünschte Laufzeit:", f"{months} Monate")
         self.ln(8)
         
-        # 3. Ergebnis Box
         self.set_font('Helvetica', 'B', 14)
         status_text = "FINANZIERUNG MÖGLICH" if res.approved else "NICHT MÖGLICH / ABGELEHNT"
         
-        # Farbe setzen
         if res.approved:
-            self.set_text_color(0, 128, 0) # Grün
+            self.set_text_color(0, 128, 0)
             self.set_draw_color(0, 128, 0)
         else:
-            self.set_text_color(200, 0, 0) # Rot
+            self.set_text_color(200, 0, 0)
             self.set_draw_color(200, 0, 0)
             
         self.cell(0, 12, status_text, border=1, ln=1, align='C')
-        self.set_text_color(0) # Reset Schwarz
-        self.set_draw_color(200) # Reset Grau für Linien
+        self.set_text_color(0)
+        self.set_draw_color(200)
         self.ln(8)
         
-        # 4. Konditionen
         self.chapter_title("2. ERMITTELTE KONDITIONEN")
         self.chapter_row("Monatliche Rate:", f"{res.monthly_rate:,.2f} EUR")
         self.chapter_row("Indikativer Zinssatz (p.a.):", f"{res.interest_rate} %")
         self.chapter_row("Gesamtrückzahlung:", f"{res.total_repayment:,.2f} EUR")
         self.ln(8)
         
-        # 5. Haushaltsrechnung
         self.chapter_title("3. DETAILS ZUR BONITÄT")
         budget = CreditDecisionEngine.calculate_affordability(c)
         self.chapter_row("Anrechenbares Haushaltseinkommen:", f"{budget['income']:,.2f} EUR")
         self.chapter_row("Pauschale Lebenshaltungskosten:", f"- {budget['living_costs_assumed']:,.2f} EUR")
         self.chapter_row("Fixkosten & Verbindlichkeiten:", f"- {budget['expenses'] - budget['living_costs_assumed']:,.2f} EUR")
         
-        # Ergebnis Zeile Fett
         self.ln(2)
         self.set_font('Helvetica', 'B', 11)
         self.cell(110, 8, "Frei verfügbares Budget:", border='T')
@@ -252,13 +251,12 @@ class ProfessionalPDF(FPDF):
 def get_session_data():
     data = {
         "project_name": st.session_state.get("project_name", ""),
-        # Alle Input-Keys mappen
         "p_net": st.session_state.get("p_net", 2500),
         "p_has_part": st.session_state.get("p_has_part", False),
         "p_part_inc": st.session_state.get("p_part_inc", 0.0),
         "p_kids": st.session_state.get("p_kids", 0),
         "p_stat": st.session_state.get("p_stat", "fest"),
-        "schufa_radio": st.session_state.get("schufa_radio", "Nein"), # UPDATE: Radio Button
+        "schufa_radio": st.session_state.get("schufa_radio", "Nein"),
         "p_rent_in": st.session_state.get("p_rent_in", 0.0),
         "p_other": st.session_state.get("p_other", 0.0),
         "p_rent_out": st.session_state.get("p_rent_out", 800.0),
@@ -267,7 +265,9 @@ def get_session_data():
         "p_save": st.session_state.get("p_save", 0.0),
         "p_amt": st.session_state.get("p_amt", 50000.0),
         "p_yrs": st.session_state.get("p_yrs", 10),
-        "base_interest": st.session_state.get("base_interest", 4.0)
+        "base_interest": st.session_state.get("base_interest", 4.0),
+        # Neuer Schalter Zustand
+        "use_scoring": st.session_state.get("use_scoring", True)
     }
     return json.dumps(data, indent=4)
 
@@ -285,43 +285,15 @@ def load_session_data(uploaded_file):
 
 # --- 4. UI HAUPTANWENDUNG ---
 def main():
-    st.sidebar.title("🗂️ Aktenverwaltung")
-    
-    st.sidebar.subheader("Kundendaten")
-    project_name = st.sidebar.text_input("Name des Kunden / Projekts", key="project_name", placeholder="z.B. Familie Müller")
-    
-    st.sidebar.divider()
-    
-    # Dateiname Generieren (App Name + Kunde)
-    clean_name = project_name.replace(" ", "_") if project_name else "Unbenannt"
-    filename_base = f"{APP_NAME.replace(' ', '_')}_{clean_name}"
-
-    json_data = get_session_data()
-    st.sidebar.download_button(
-        label="💾 Daten sichern (JSON)",
-        data=json_data,
-        file_name=f"{filename_base}.json",
-        mime="application/json"
-    )
-    
-    uploaded_file = st.sidebar.file_uploader("📂 Daten laden", type=["json"])
-    if uploaded_file:
-        if st.sidebar.button("Importieren"):
-            load_session_data(uploaded_file)
-            
-    st.sidebar.divider()
-    if st.sidebar.button("🔒 Abmelden"):
-        st.session_state.logged_in = False
-        st.rerun()
-
-    # HAUPTSEITE
+    # --- HEADER ---
     st.title(f"💼 {APP_NAME}")
-    if project_name:
-        st.caption(f"Aktueller Mandant: **{project_name}**")
+    
+    # Kundenname oben, damit es präsent ist
+    project_name = st.text_input("Name des Kunden / Projekts", key="project_name", placeholder="z.B. Familie Müller")
 
     tab_simple, tab_pro = st.tabs(["🔢 Schnellrechner", "🏦 Profi-Analyse"])
 
-    # TAB 1
+    # TAB 1: EINFACHER RECHNER
     with tab_simple:
         st.subheader("Kredit-Schnellrechner")
         calc_mode = st.radio("Berechnungsmodus", ["Kreditrate berechnen (Summe gegeben)", "Kreditsumme berechnen (Rate gegeben)"])
@@ -351,7 +323,7 @@ def main():
                 col_res1.metric("Mögliche Kreditsumme", f"{loan_res:,.2f} €")
                 col_res2.metric("Gesamtrückzahlung", f"{total_res:,.2f} €", delta=f"Kosten: {total_res - loan_res:,.2f} €", delta_color="inverse")
 
-    # TAB 2
+    # TAB 2: PROFI CHECK
     with tab_pro:
         st.caption("Detaillierte Prüfung der Kapitaldienstfähigkeit")
         
@@ -367,8 +339,6 @@ def main():
             
             c3, c4 = st.columns(2)
             emp_status = c3.selectbox("Arbeitsverhältnis", ["fest", "befristet", "probezeit", "selbststaendig"], key="p_stat")
-            
-            # UPDATE: Radio Button statt Toggle
             schufa_select = c4.radio("Vorhandene Schufa-Einträge?", ["Nein", "Ja"], horizontal=True, key="schufa_radio")
             schufa_clean = True if schufa_select == "Nein" else False
 
@@ -376,8 +346,6 @@ def main():
             c1, c2 = st.columns(2)
             rental = c1.number_input("Einnahmen aus Vermietung (Kalt)", 0, step=50, key="p_rent_in")
             other_inc = c1.number_input("Sonstige Einnahmen", 0, step=50, key="p_other")
-            
-            # UPDATE: Labels ausgeschrieben
             rent_warm = c2.number_input("Aktuelle Warmmiete", 800, step=50, key="p_rent_out")
             mortgage = c2.number_input("Rate für Immobilienfinanzierung", 0, step=50, key="p_mort")
             loans = c2.number_input("Rate für Konsumkredite (Auto etc.)", 0, step=50, key="p_loan")
@@ -387,7 +355,10 @@ def main():
             cw1, cw2, cw3 = st.columns(3)
             amount = cw1.number_input("Kreditsumme (€)", 50000, step=1000, key="p_amt")
             years = cw2.slider("Laufzeit (Jahre)", 1, 30, 10, key="p_yrs")
-            base_interest = cw3.number_input("Aktueller Sollzins (%)", value=4.0, step=0.1, key="base_interest")
+            base_interest = cw3.number_input("Basis-Zins (%)", value=4.0, step=0.1, key="base_interest")
+            
+        # NEU: Schalter für Scoring
+        use_scoring = st.toggle("Automatisches Bank-Scoring (Risikoaufschläge)", value=True, key="use_scoring", help="Wenn aktiv, werden Aufschläge für Laufzeit (>7 Jahre) oder Risikoberufe auf den Basis-Zins addiert.")
 
         if st.button("Prüfung starten", type="primary", key="btn_pro"):
             customer = CustomerData(
@@ -400,7 +371,8 @@ def main():
                 employment_status=emp_status, schufa_clean=schufa_clean
             )
             
-            result = CreditDecisionEngine.calculate_loan(customer, amount, years*12, base_interest)
+            # Schalter-Wert übergeben
+            result = CreditDecisionEngine.calculate_loan(customer, amount, years*12, base_interest, use_scoring)
             
             st.divider()
             c_res1, c_res2 = st.columns([2, 1])
@@ -408,7 +380,11 @@ def main():
                 if result.approved:
                     st.subheader("✅ FINANZIERUNG MÖGLICH")
                     st.metric("Monatliche Rate", f"{result.monthly_rate:,.2f} €")
-                    st.caption(f"Indikativer Zinssatz: {result.interest_rate}%")
+                    # Dynamische Anzeige je nach Modus
+                    if use_scoring:
+                        st.caption(f"Indikativer Zinssatz: {result.interest_rate}% (Basis {base_interest}% + Risiko)")
+                    else:
+                        st.caption(f"Fixer Zinssatz: {result.interest_rate}%")
                 else:
                     st.subheader("⚠️ NICHT MÖGLICH")
                     st.error("Die Kriterien für eine Kreditvergabe sind nicht erfüllt.")
@@ -429,13 +405,46 @@ def main():
             pdf = ProfessionalPDF()
             pdf_data = pdf.create_report(result, customer, amount, years*12)
             
-            # Download Button mit kombiniertem Dateinamen
             st.download_button(
                 label="📄 PDF Bericht herunterladen",
                 data=pdf_data,
-                file_name=f"{filename_base}.pdf",
+                file_name=f"{project_name.replace(' ', '_')}_Bericht.pdf",
                 mime="application/pdf"
             )
+
+    # --- DATENVERWALTUNG (UNTEN) ---
+    st.divider()
+    st.subheader("💾 Datenverwaltung")
+    
+    col_save, col_load = st.columns(2)
+    
+    with col_save:
+        # Dateiname Generieren
+        clean_name = project_name.replace(" ", "_") if project_name else "Unbenannt"
+        filename_base = f"{APP_NAME.replace(' ', '_')}_{clean_name}"
+        json_data = get_session_data()
+        
+        st.download_button(
+            label="⬇️ Daten Speichern (JSON)",
+            data=json_data,
+            file_name=f"{filename_base}.json",
+            mime="application/json",
+            use_container_width=True
+        )
+        
+    with col_load:
+        uploaded_file = st.file_uploader("📂 Daten Laden", type=["json"], label_visibility="collapsed")
+        if uploaded_file:
+            if st.button("⬆️ Importieren", use_container_width=True):
+                load_session_data(uploaded_file)
+    
+    st.caption("Zum Speichern: 'Daten Speichern' klicken. Zum Laden: JSON-Datei auswählen und 'Importieren' klicken.")
+
+    # LOGOUT GANZ UNTEN
+    st.divider()
+    if st.button("🔒 Abmelden"):
+        st.session_state.logged_in = False
+        st.rerun()
 
 if __name__ == "__main__":
     main()
