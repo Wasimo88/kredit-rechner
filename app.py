@@ -433,7 +433,7 @@ def main():
             st.download_button(
                 label="📄 PDF Bericht herunterladen",
                 data=pdf_data,
-                file_name=f"{project_name.replace(' ', '_')}_Bericht.pdf",
+                file_name=f"{project_name.replace(' ', '_')}_Finanz-Suite Pro.pdf",
                 mime="application/pdf"
             )
 
