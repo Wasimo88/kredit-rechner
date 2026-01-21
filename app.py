@@ -5,37 +5,36 @@ import time
 from dataclasses import dataclass, field
 from typing import List
 from fpdf import FPDF
+from datetime import datetime
 
-# --- 0. PASSWORT SCHUTZ VIA SECRETS ---
-st.set_page_config(page_title="Finanz-Suite Pro", page_icon="💼")
+# --- 0. SETUP & PASSWORT ---
+APP_NAME = "Finanz-Suite Pro" # Name für Dateispeicherung
 
-# Versuche das Passwort sicher aus den Streamlit Secrets zu laden
+st.set_page_config(page_title=APP_NAME, page_icon="⚖️")
+
+# Versuch, Passwort aus Secrets zu laden
 try:
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
 except Exception:
-    st.error("⚠️ Fehler: Kein Passwort konfiguriert.")
-    st.info("Bitte füge in den Streamlit-Settings unter 'Secrets' hinzu: APP_PASSWORD = \"DeinGeheimesPasswort\"")
+    st.warning("⚠️ Kein Passwort konfiguriert. (Siehe Streamlit Secrets)")
     st.stop()
 
-# Session State Initialisierung (Login Status prüfen)
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 
 def check_password():
-    """Prüft das Passwort und schaltet die App frei."""
     if st.session_state.password_input == APP_PASSWORD:
         st.session_state.logged_in = True
     else:
-        st.error("Falsches Passwort!")
+        st.error("Zugriff verweigert.")
 
-# --- LOGIN SCREEN ---
 if not st.session_state.logged_in:
-    st.title("🔒 Geschützter Bereich")
-    st.text_input("Bitte Passwort eingeben:", type="password", key="password_input", on_change=check_password)
-    st.button("Login", on_click=check_password)
-    st.stop() # Stoppt die App hier, bis Login erfolgreich
+    st.title("🔒 Login erforderlich")
+    st.text_input("Passwort:", type="password", key="password_input", on_change=check_password)
+    st.button("Anmelden", on_click=check_password)
+    st.stop()
 
-# --- 1. LOGIK & BANK REGELN ---
+# --- 1. DATEN & LOGIK ---
 
 class BankPolicy:
     MIN_LIVING_COST_ADULT = 850.0
@@ -101,9 +100,9 @@ class CreditDecisionEngine:
     def check_hard_knockouts(c: CustomerData, amount: float) -> List[str]:
         errors = []
         if not c.schufa_clean:
-            errors.append("POLICY: Negative Schufa-Merkmale.")
+            errors.append("POLICY: Negative Schufa-Einträge vorhanden.")
         if c.employment_status == "probezeit" and amount > 5000:
-            errors.append("POLICY: In Probezeit max. 5.000 €.")
+            errors.append("POLICY: Während der Probezeit max. 5.000 € Darlehen möglich.")
         return errors
 
     @staticmethod
@@ -146,10 +145,10 @@ class CreditDecisionEngine:
         is_possible = True
         if disposable < rate:
             is_possible = False
-            messages.append(f"NEGATIV: Rate ({rate}€) höher als freies Budget ({disposable}€).")
+            messages.append(f"NEGATIV: Rate ({rate}€) übersteigt das freie Budget ({disposable}€).")
         if dti_current > BankPolicy.MAX_DTI_PERCENT:
             is_possible = False
-            messages.append(f"RISIKO: DTI Quote zu hoch ({dti_current:.1f}%).")
+            messages.append(f"RISIKO: Verschuldungsquote (DTI) zu hoch ({dti_current:.1f}%).")
 
         total_repay = rate * months
         
@@ -164,56 +163,102 @@ class CreditDecisionEngine:
             dti_ratio=dti_current
         )
 
-# --- 2. PDF ENGINE ---
-class BankPDF(FPDF):
+# --- 2. PROFESSIONELLES PDF ---
+class ProfessionalPDF(FPDF):
     def header(self):
-        self.set_font('Helvetica', 'B', 16)
-        self.cell(0, 10, 'FINANZIERUNGS-PRÜFUNG', 0, 1, 'C')
-        self.ln(5)
+        # Titelzeile
+        self.set_font('Helvetica', 'B', 18)
+        self.cell(0, 10, 'FINANZIERUNGS-ERMITTLUNG', 0, 1, 'L')
+        # Linie
+        self.set_draw_color(100, 100, 100)
+        self.set_line_width(0.5)
+        self.line(10, 22, 200, 22)
+        self.ln(15)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Helvetica', 'I', 8)
+        self.set_text_color(128)
+        self.cell(0, 10, f'Erstellt mit {APP_NAME} | Seite ' + str(self.page_no()), 0, 0, 'C')
+
+    def chapter_title(self, label):
+        self.set_font('Helvetica', 'B', 12)
+        self.set_fill_color(240, 240, 240)
+        self.set_text_color(0)
+        self.cell(0, 8, f"  {label}", 0, 1, 'L', fill=True)
+        self.ln(4)
+
+    def chapter_row(self, label, value):
+        self.set_font('Helvetica', '', 11)
+        self.cell(110, 7, label, border='B')
+        self.set_font('Helvetica', 'B', 11)
+        self.cell(0, 7, value, border='B', ln=1, align='R')
 
     def create_report(self, res: LoanResult, c: CustomerData, amount, months):
         self.add_page()
+        
+        # 1. Kopfdaten
         self.set_font('Helvetica', '', 11)
+        self.cell(0, 6, f"Kunde / Projekt: {c.project_name}", 0, 1)
+        self.cell(0, 6, f"Datum: {datetime.now().strftime('%d.%m.%Y')}", 0, 1)
+        self.ln(8)
         
-        self.cell(0, 8, f"Kunde / Projekt: {c.project_name}", 0, 1)
-        self.cell(0, 8, f"Kreditsumme: {amount:,.2f} EUR | Laufzeit: {months} Monate", 0, 1)
-        self.ln(5)
+        # 2. Kreditwunsch
+        self.chapter_title("1. KREDITANFRAGE")
+        self.chapter_row("Gewünschter Nettokreditbetrag:", f"{amount:,.2f} EUR")
+        self.chapter_row("Gewünschte Laufzeit:", f"{months} Monate")
+        self.ln(8)
         
+        # 3. Ergebnis Box
         self.set_font('Helvetica', 'B', 14)
-        status = "FINANZIERUNG MÖGLICH" if res.approved else "NICHT MÖGLICH"
-        color = (0, 150, 0) if res.approved else (200, 0, 0)
-        self.set_text_color(*color)
-        self.cell(0, 10, f"ERGEBNIS: {status}", 0, 1)
-        self.set_text_color(0,0,0)
-        self.ln(5)
+        status_text = "FINANZIERUNG MÖGLICH" if res.approved else "NICHT MÖGLICH / ABGELEHNT"
         
-        self.set_font('Helvetica', '', 11)
-        self.cell(95, 8, f"Monatliche Rate: {res.monthly_rate:,.2f} EUR")
-        self.cell(95, 8, f"Kalkulierter Zins: {res.interest_rate} %", 0, 1)
-        self.cell(95, 8, f"Gesamtrückzahlung: {res.total_repayment:,.2f} EUR")
-        self.ln(5)
+        # Farbe setzen
+        if res.approved:
+            self.set_text_color(0, 128, 0) # Grün
+            self.set_draw_color(0, 128, 0)
+        else:
+            self.set_text_color(200, 0, 0) # Rot
+            self.set_draw_color(200, 0, 0)
+            
+        self.cell(0, 12, status_text, border=1, ln=1, align='C')
+        self.set_text_color(0) # Reset Schwarz
+        self.set_draw_color(200) # Reset Grau für Linien
+        self.ln(8)
         
-        self.set_font('Helvetica', 'B', 11)
-        self.cell(0, 8, "Details zur Haushaltsrechnung:", 0, 1)
-        self.set_font('Helvetica', '', 10)
+        # 4. Konditionen
+        self.chapter_title("2. ERMITTELTE KONDITIONEN")
+        self.chapter_row("Monatliche Rate:", f"{res.monthly_rate:,.2f} EUR")
+        self.chapter_row("Indikativer Zinssatz (p.a.):", f"{res.interest_rate} %")
+        self.chapter_row("Gesamtrückzahlung:", f"{res.total_repayment:,.2f} EUR")
+        self.ln(8)
+        
+        # 5. Haushaltsrechnung
+        self.chapter_title("3. DETAILS ZUR BONITÄT")
         budget = CreditDecisionEngine.calculate_affordability(c)
-        self.cell(100, 6, f"Haushalts-Einkommen:", 0, 0)
-        self.cell(50, 6, f"{budget['income']:,.2f} EUR", 0, 1, 'R')
-        self.cell(100, 6, f"Frei verfügbar:", 0, 0)
-        self.cell(50, 6, f"{res.disposable_income:,.2f} EUR", 0, 1, 'R')
+        self.chapter_row("Anrechenbares Haushaltseinkommen:", f"{budget['income']:,.2f} EUR")
+        self.chapter_row("Pauschale Lebenshaltungskosten:", f"- {budget['living_costs_assumed']:,.2f} EUR")
+        self.chapter_row("Fixkosten & Verbindlichkeiten:", f"- {budget['expenses'] - budget['living_costs_assumed']:,.2f} EUR")
+        
+        # Ergebnis Zeile Fett
+        self.ln(2)
+        self.set_font('Helvetica', 'B', 11)
+        self.cell(110, 8, "Frei verfügbares Budget:", border='T')
+        self.cell(0, 8, f"{res.disposable_income:,.2f} EUR", border='T', ln=1, align='R')
         
         return bytes(self.output())
 
-# --- 3. SPEICHERN & LADEN LOGIK ---
+# --- 3. SPEICHERN & LADEN ---
 def get_session_data():
     data = {
         "project_name": st.session_state.get("project_name", ""),
+        # Alle Input-Keys mappen
         "p_net": st.session_state.get("p_net", 2500),
         "p_has_part": st.session_state.get("p_has_part", False),
         "p_part_inc": st.session_state.get("p_part_inc", 0.0),
         "p_kids": st.session_state.get("p_kids", 0),
         "p_stat": st.session_state.get("p_stat", "fest"),
-        "p_schufa": st.session_state.get("p_schufa", True),
+        "schufa_radio": st.session_state.get("schufa_radio", "Nein"), # UPDATE: Radio Button
         "p_rent_in": st.session_state.get("p_rent_in", 0.0),
         "p_other": st.session_state.get("p_other", 0.0),
         "p_rent_out": st.session_state.get("p_rent_out", 800.0),
@@ -232,110 +277,119 @@ def load_session_data(uploaded_file):
             data = json.load(uploaded_file)
             for key, value in data.items():
                 st.session_state[key] = value
-            st.success("Daten erfolgreich geladen!")
+            st.success("Daten importiert.")
             time.sleep(0.5)
             st.rerun()
         except Exception as e:
-            st.error(f"Fehler beim Laden: {e}")
+            st.error(f"Fehler: {e}")
 
-# --- 4. HAUPTANWENDUNG ---
+# --- 4. UI HAUPTANWENDUNG ---
 def main():
-    st.sidebar.title("🗂️ Verwaltung")
+    st.sidebar.title("🗂️ Aktenverwaltung")
     
-    st.sidebar.subheader("Projekt / Kunde")
-    project_name = st.sidebar.text_input("Name eingeben", key="project_name", placeholder="z.B. Familie Müller")
+    st.sidebar.subheader("Kundendaten")
+    project_name = st.sidebar.text_input("Name des Kunden / Projekts", key="project_name", placeholder="z.B. Familie Müller")
     
     st.sidebar.divider()
-    st.sidebar.subheader("Daten sichern")
     
+    # Dateiname Generieren (App Name + Kunde)
+    clean_name = project_name.replace(" ", "_") if project_name else "Unbenannt"
+    filename_base = f"{APP_NAME.replace(' ', '_')}_{clean_name}"
+
     json_data = get_session_data()
-    file_name = f"{project_name if project_name else 'Kreditdaten'}.json"
     st.sidebar.download_button(
-        label="💾 Speichern (Download)",
+        label="💾 Daten sichern (JSON)",
         data=json_data,
-        file_name=file_name,
+        file_name=f"{filename_base}.json",
         mime="application/json"
     )
     
-    uploaded_file = st.sidebar.file_uploader("📂 Laden (Upload)", type=["json"])
+    uploaded_file = st.sidebar.file_uploader("📂 Daten laden", type=["json"])
     if uploaded_file:
-        if st.sidebar.button("Daten importieren"):
+        if st.sidebar.button("Importieren"):
             load_session_data(uploaded_file)
             
     st.sidebar.divider()
-    if st.sidebar.button("🔒 Logout"):
+    if st.sidebar.button("🔒 Abmelden"):
         st.session_state.logged_in = False
         st.rerun()
 
-    st.title("💼 Finanz-Suite Pro")
+    # HAUPTSEITE
+    st.title(f"💼 {APP_NAME}")
     if project_name:
-        st.caption(f"Aktuelles Projekt: **{project_name}**")
+        st.caption(f"Aktueller Mandant: **{project_name}**")
 
-    tab_simple, tab_pro = st.tabs(["🔢 Einfacher Rechner", "🏦 Profi Bank-Check"])
+    tab_simple, tab_pro = st.tabs(["🔢 Schnellrechner", "🏦 Profi-Analyse"])
 
+    # TAB 1
     with tab_simple:
-        st.subheader("Schnell-Kalkulation")
-        calc_mode = st.radio("Was berechnen?", ["Ich habe eine Summe", "Ich habe eine Wunschrate"], horizontal=True)
+        st.subheader("Kredit-Schnellrechner")
+        calc_mode = st.radio("Berechnungsmodus", ["Kreditrate berechnen (Summe gegeben)", "Kreditsumme berechnen (Rate gegeben)"])
         c1, c2, c3 = st.columns(3)
         amount_input = 0.0
         rate_input = 0.0
         
-        if calc_mode == "Ich habe eine Summe":
+        if "Summe gegeben" in calc_mode:
             amount_input = c1.number_input("Kreditbetrag (€)", 10000, step=1000)
         else:
-            rate_input = c1.number_input("Wunschrate (€)", 300, step=50)
+            rate_input = c1.number_input("Gewünschte Rate (€)", 300, step=50)
             
         years_simple = c2.number_input("Laufzeit (Jahre)", 1, 30, 5)
         interest_simple = c3.number_input("Zinssatz (%)", value=4.5, step=0.1)
         
-        if st.button("Rechnen", type="primary", key="btn_simple"):
+        if st.button("Berechnen", type="primary", key="btn_simple"):
             st.divider()
             col_res1, col_res2 = st.columns(2)
-            if calc_mode == "Ich habe eine Summe":
+            if "Summe gegeben" in calc_mode:
                 rate_res = FinancialMath.calculate_rate(amount_input, years_simple, interest_simple)
                 total_res = rate_res * years_simple * 12
-                interest_cost = total_res - amount_input
                 col_res1.metric("Monatliche Rate", f"{rate_res:,.2f} €")
-                col_res2.metric("Gesamtkosten", f"{total_res:,.2f} €", delta=f"davon {interest_cost:,.2f} € Zinsen", delta_color="inverse")
+                col_res2.metric("Gesamtkosten", f"{total_res:,.2f} €", delta=f"Zinsanteil: {total_res - amount_input:,.2f} €", delta_color="inverse")
             else:
                 loan_res = FinancialMath.calculate_max_loan(rate_input, years_simple, interest_simple)
                 total_res = rate_input * years_simple * 12
-                interest_cost = total_res - loan_res
                 col_res1.metric("Mögliche Kreditsumme", f"{loan_res:,.2f} €")
-                col_res2.metric("Gesamtrückzahlung", f"{total_res:,.2f} €", delta=f"Kosten: {interest_cost:,.2f} €", delta_color="inverse")
+                col_res2.metric("Gesamtrückzahlung", f"{total_res:,.2f} €", delta=f"Kosten: {total_res - loan_res:,.2f} €", delta_color="inverse")
 
+    # TAB 2
     with tab_pro:
-        st.caption("Detaillierte Prüfung für: " + (project_name if project_name else "Unbenannt"))
+        st.caption("Detaillierte Prüfung der Kapitaldienstfähigkeit")
         
         with st.expander("👤 1. Haushalt & Einkommen", expanded=True):
             col1, col2 = st.columns(2)
-            net_income = col1.number_input("Dein Nettoeinkommen (€)", 2500, step=50, key="p_net")
+            net_income = col1.number_input("Monatliches Nettoeinkommen (€)", 2500, step=50, key="p_net")
             has_partner = col2.checkbox("Partner im Haushalt?", key="p_has_part")
             partner_income = 0.0
             if has_partner:
-                partner_income = col2.number_input("Netto Partner (€)", 0, step=50, key="p_part_inc")
+                partner_income = col2.number_input("Nettoeinkommen Partner (€)", 0, step=50, key="p_part_inc")
                 st.success(f"Haushalts-Netto: {net_income + partner_income:,.2f} €")
-            kids = st.slider("Kinder", 0, 5, 0, key="p_kids")
+            kids = st.slider("Anzahl Kinder im Haushalt", 0, 5, 0, key="p_kids")
+            
             c3, c4 = st.columns(2)
-            emp_status = c3.selectbox("Status", ["fest", "befristet", "probezeit", "selbststaendig"], key="p_stat")
-            schufa = c4.toggle("Schufa sauber?", value=True, key="p_schufa")
+            emp_status = c3.selectbox("Arbeitsverhältnis", ["fest", "befristet", "probezeit", "selbststaendig"], key="p_stat")
+            
+            # UPDATE: Radio Button statt Toggle
+            schufa_select = c4.radio("Vorhandene Schufa-Einträge?", ["Nein", "Ja"], horizontal=True, key="schufa_radio")
+            schufa_clean = True if schufa_select == "Nein" else False
 
         with st.expander("💰 2. Ausgaben & Verbindlichkeiten", expanded=False):
             c1, c2 = st.columns(2)
-            rental = c1.number_input("Mieteinnahmen (Kalt)", 0, step=50, key="p_rent_in")
+            rental = c1.number_input("Einnahmen aus Vermietung (Kalt)", 0, step=50, key="p_rent_in")
             other_inc = c1.number_input("Sonstige Einnahmen", 0, step=50, key="p_other")
+            
+            # UPDATE: Labels ausgeschrieben
             rent_warm = c2.number_input("Aktuelle Warmmiete", 800, step=50, key="p_rent_out")
-            mortgage = c2.number_input("Kreditraten Immo", 0, step=50, key="p_mort")
-            loans = c2.number_input("Ratenkredite (Auto)", 0, step=50, key="p_loan")
-            savings = c2.number_input("Feste Sparrate", 0, step=50, key="p_save")
+            mortgage = c2.number_input("Rate für Immobilienfinanzierung", 0, step=50, key="p_mort")
+            loans = c2.number_input("Rate für Konsumkredite (Auto etc.)", 0, step=50, key="p_loan")
+            savings = c2.number_input("Monatliche Sparrate", 0, step=50, key="p_save")
 
-        with st.expander("📊 3. Kreditwunsch & Markt", expanded=True):
+        with st.expander("📊 3. Finanzierungswunsch", expanded=True):
             cw1, cw2, cw3 = st.columns(3)
             amount = cw1.number_input("Kreditsumme (€)", 50000, step=1000, key="p_amt")
-            years = cw2.slider("Laufzeit (Jahre)", 1, 25, 10, key="p_yrs")
-            base_interest = cw3.number_input("Basis-Zins aktuell (%)", value=4.0, step=0.1, key="base_interest")
+            years = cw2.slider("Laufzeit (Jahre)", 1, 30, 10, key="p_yrs")
+            base_interest = cw3.number_input("Aktueller Sollzins (%)", value=4.0, step=0.1, key="base_interest")
 
-        if st.button("Bonität prüfen", type="primary", key="btn_pro"):
+        if st.button("Prüfung starten", type="primary", key="btn_pro"):
             customer = CustomerData(
                 project_name=project_name if project_name else "Unbenannt",
                 net_income=net_income, partner_income=partner_income,
@@ -343,7 +397,7 @@ def main():
                 rent_warm=rent_warm, mortgage_payment=mortgage,
                 existing_loans=loans, savings_rate=savings,
                 has_partner=has_partner, children_count=kids,
-                employment_status=emp_status, schufa_clean=schufa
+                employment_status=emp_status, schufa_clean=schufa_clean
             )
             
             result = CreditDecisionEngine.calculate_loan(customer, amount, years*12, base_interest)
@@ -353,16 +407,16 @@ def main():
             with c_res1:
                 if result.approved:
                     st.subheader("✅ FINANZIERUNG MÖGLICH")
-                    st.metric("Kalkulierte Rate", f"{result.monthly_rate:,.2f} €")
-                    st.caption(f"Zinssatz (Indikativ): {result.interest_rate}%")
+                    st.metric("Monatliche Rate", f"{result.monthly_rate:,.2f} €")
+                    st.caption(f"Indikativer Zinssatz: {result.interest_rate}%")
                 else:
-                    st.subheader("⚠️ KRITISCH / NICHT MÖGLICH")
-                    st.error("Kriterien der Bank-Logik nicht erfüllt.")
+                    st.subheader("⚠️ NICHT MÖGLICH")
+                    st.error("Die Kriterien für eine Kreditvergabe sind nicht erfüllt.")
             
             with c_res2:
-                st.write("**Budget-Check:**")
+                st.write("**Haushalts-Check:**")
                 st.write(f"Frei: {result.disposable_income:,.2f} €")
-                st.write(f"DTI: {result.dti_ratio:.1f}%")
+                st.write(f"Auslastung: {result.dti_ratio:.1f}%")
 
             if result.messages:
                 with st.container(border=True):
@@ -372,9 +426,16 @@ def main():
                         else:
                             st.write(f"ℹ️ {msg}")
 
-            pdf = BankPDF()
+            pdf = ProfessionalPDF()
             pdf_data = pdf.create_report(result, customer, amount, years*12)
-            st.download_button("📄 Prüfprotokoll (PDF)", data=pdf_data, file_name=f"Finanzpruefung_{project_name}.pdf", mime="application/pdf")
+            
+            # Download Button mit kombiniertem Dateinamen
+            st.download_button(
+                label="📄 PDF Bericht herunterladen",
+                data=pdf_data,
+                file_name=f"{filename_base}.pdf",
+                mime="application/pdf"
+            )
 
 if __name__ == "__main__":
     main()
