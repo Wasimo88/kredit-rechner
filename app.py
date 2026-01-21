@@ -1,39 +1,43 @@
 import streamlit as st
 import math
+import json
+import time
 from dataclasses import dataclass, field
 from typing import List
 from fpdf import FPDF
 
-# ==========================================
-# 🔒 PASSWORD
-# ==========================================
-def check_password():
-    if "password_correct" not in st.session_state:
-        st.session_state.password_correct = None
-    if st.session_state.password_correct == True:
-        return True
+# --- 0. PASSWORT SCHUTZ VIA SECRETS ---
+st.set_page_config(page_title="Finanz-Suite Pro", page_icon="💼")
 
-    def password_entered():
-        if st.session_state["password_input"] == st.secrets["password"]:
-            st.session_state.password_correct = True
-            del st.session_state["password_input"]
-        else:
-            st.session_state.password_correct = False
-
-    st.text_input("🔒 Passwort", type="password", on_change=password_entered, key="password_input")
-    if st.session_state.password_correct == False:
-        st.error("Falsches Passwort.")
-    return False
-
-if not check_password():
+# Versuche das Passwort sicher aus den Streamlit Secrets zu laden
+try:
+    APP_PASSWORD = st.secrets["APP_PASSWORD"]
+except Exception:
+    st.error("⚠️ Fehler: Kein Passwort konfiguriert.")
+    st.info("Bitte füge in den Streamlit-Settings unter 'Secrets' hinzu: APP_PASSWORD = \"DeinGeheimesPasswort\"")
     st.stop()
 
-#============================================
+# Session State Initialisierung (Login Status prüfen)
+if 'logged_in' not in st.session_state:
+    st.session_state.logged_in = False
 
-# --- 1. KONFIGURATION & LOGIK ---
+def check_password():
+    """Prüft das Passwort und schaltet die App frei."""
+    if st.session_state.password_input == APP_PASSWORD:
+        st.session_state.logged_in = True
+    else:
+        st.error("Falsches Passwort!")
+
+# --- LOGIN SCREEN ---
+if not st.session_state.logged_in:
+    st.title("🔒 Geschützter Bereich")
+    st.text_input("Bitte Passwort eingeben:", type="password", key="password_input", on_change=check_password)
+    st.button("Login", on_click=check_password)
+    st.stop() # Stoppt die App hier, bis Login erfolgreich
+
+# --- 1. LOGIK & BANK REGELN ---
 
 class BankPolicy:
-    # Pauschalen (Banken-Standard)
     MIN_LIVING_COST_ADULT = 850.0
     MIN_LIVING_COST_PARTNER = 450.0
     MIN_LIVING_COST_CHILD = 350.0 
@@ -41,18 +45,16 @@ class BankPolicy:
 
     @staticmethod
     def get_dynamic_living_costs(net_income_household: float, has_partner: bool, children: int) -> float:
-        # Basisbedarf
         base_need = BankPolicy.MIN_LIVING_COST_ADULT
         if has_partner:
             base_need += BankPolicy.MIN_LIVING_COST_PARTNER
         base_need += (children * BankPolicy.MIN_LIVING_COST_CHILD)
-        
-        # Lifestyle-Pauschale: Wer mehr verdient, gibt mehr aus (max 35% vom Netto)
         dynamic_need = net_income_household * 0.35
         return max(base_need, dynamic_need)
 
 @dataclass
 class CustomerData:
+    project_name: str
     net_income: float
     partner_income: float = 0.0
     rental_income: float = 0.0
@@ -106,12 +108,9 @@ class CreditDecisionEngine:
 
     @staticmethod
     def calculate_affordability(c: CustomerData) -> dict:
-        # Mieteinnahmen pauschal 80%
         adj_rental = c.rental_income * 0.80
         total_income = c.net_income + c.partner_income + adj_rental + c.other_income
-        
         living_costs = BankPolicy.get_dynamic_living_costs(total_income, c.has_partner, c.children_count)
-        
         housing_cost = c.rent_warm + c.mortgage_payment
         liabilities = c.existing_loans + c.savings_rate
         total_expenses = living_costs + housing_cost + liabilities
@@ -130,19 +129,15 @@ class CreditDecisionEngine:
         if ko_errors:
             return LoanResult(False, 0, 0, 0, 0, ko_errors)
 
-        # Zinssatz ermitteln (Basis + Risikoaufschlag)
         interest_rate = base_interest
         if c.employment_status == "befristet": interest_rate += 1.5
         if c.employment_status == "selbststaendig": interest_rate += 2.0
-        if months > 84: interest_rate += 0.5 # Laufzeitaufschlag
-        
+        if months > 84: interest_rate += 0.5 
         interest_rate = round(interest_rate, 2)
         
-        # Rate berechnen
         rate = FinancialMath.calculate_rate(amount, months/12, interest_rate)
         rate = round(rate, 2)
         
-        # Prüfungen
         budget = CreditDecisionEngine.calculate_affordability(c)
         disposable = budget["disposable"]
         household_net = c.net_income + c.partner_income
@@ -179,6 +174,8 @@ class BankPDF(FPDF):
     def create_report(self, res: LoanResult, c: CustomerData, amount, months):
         self.add_page()
         self.set_font('Helvetica', '', 11)
+        
+        self.cell(0, 8, f"Kunde / Projekt: {c.project_name}", 0, 1)
         self.cell(0, 8, f"Kreditsumme: {amount:,.2f} EUR | Laufzeit: {months} Monate", 0, 1)
         self.ln(5)
         
@@ -200,30 +197,86 @@ class BankPDF(FPDF):
         self.cell(0, 8, "Details zur Haushaltsrechnung:", 0, 1)
         self.set_font('Helvetica', '', 10)
         budget = CreditDecisionEngine.calculate_affordability(c)
-        self.cell(100, 6, f"Haushalts-Einkommen (angerechnet):", 0, 0)
+        self.cell(100, 6, f"Haushalts-Einkommen:", 0, 0)
         self.cell(50, 6, f"{budget['income']:,.2f} EUR", 0, 1, 'R')
         self.cell(100, 6, f"Frei verfügbar:", 0, 0)
         self.cell(50, 6, f"{res.disposable_income:,.2f} EUR", 0, 1, 'R')
         
         return bytes(self.output())
 
-# --- 3. FRONTEND (STREAMLIT) ---
-def main():
-    st.set_page_config(page_title="Finanz-Suite V3", page_icon="💶")
-    st.title("💶 Finanz-Suite")
+# --- 3. SPEICHERN & LADEN LOGIK ---
+def get_session_data():
+    data = {
+        "project_name": st.session_state.get("project_name", ""),
+        "p_net": st.session_state.get("p_net", 2500),
+        "p_has_part": st.session_state.get("p_has_part", False),
+        "p_part_inc": st.session_state.get("p_part_inc", 0.0),
+        "p_kids": st.session_state.get("p_kids", 0),
+        "p_stat": st.session_state.get("p_stat", "fest"),
+        "p_schufa": st.session_state.get("p_schufa", True),
+        "p_rent_in": st.session_state.get("p_rent_in", 0.0),
+        "p_other": st.session_state.get("p_other", 0.0),
+        "p_rent_out": st.session_state.get("p_rent_out", 800.0),
+        "p_mort": st.session_state.get("p_mort", 0.0),
+        "p_loan": st.session_state.get("p_loan", 0.0),
+        "p_save": st.session_state.get("p_save", 0.0),
+        "p_amt": st.session_state.get("p_amt", 50000.0),
+        "p_yrs": st.session_state.get("p_yrs", 10),
+        "base_interest": st.session_state.get("base_interest", 4.0)
+    }
+    return json.dumps(data, indent=4)
 
-    # HAUPT-NAVIGATION
+def load_session_data(uploaded_file):
+    if uploaded_file is not None:
+        try:
+            data = json.load(uploaded_file)
+            for key, value in data.items():
+                st.session_state[key] = value
+            st.success("Daten erfolgreich geladen!")
+            time.sleep(0.5)
+            st.rerun()
+        except Exception as e:
+            st.error(f"Fehler beim Laden: {e}")
+
+# --- 4. HAUPTANWENDUNG ---
+def main():
+    st.sidebar.title("🗂️ Verwaltung")
+    
+    st.sidebar.subheader("Projekt / Kunde")
+    project_name = st.sidebar.text_input("Name eingeben", key="project_name", placeholder="z.B. Familie Müller")
+    
+    st.sidebar.divider()
+    st.sidebar.subheader("Daten sichern")
+    
+    json_data = get_session_data()
+    file_name = f"{project_name if project_name else 'Kreditdaten'}.json"
+    st.sidebar.download_button(
+        label="💾 Speichern (Download)",
+        data=json_data,
+        file_name=file_name,
+        mime="application/json"
+    )
+    
+    uploaded_file = st.sidebar.file_uploader("📂 Laden (Upload)", type=["json"])
+    if uploaded_file:
+        if st.sidebar.button("Daten importieren"):
+            load_session_data(uploaded_file)
+            
+    st.sidebar.divider()
+    if st.sidebar.button("🔒 Logout"):
+        st.session_state.logged_in = False
+        st.rerun()
+
+    st.title("💼 Finanz-Suite Pro")
+    if project_name:
+        st.caption(f"Aktuelles Projekt: **{project_name}**")
+
     tab_simple, tab_pro = st.tabs(["🔢 Einfacher Rechner", "🏦 Profi Bank-Check"])
 
-    # ---------------------------------------------------------
-    # TAB 1: EINFACHER RECHNER (Die "Allrounder" Funktion)
-    # ---------------------------------------------------------
     with tab_simple:
         st.subheader("Schnell-Kalkulation")
         calc_mode = st.radio("Was berechnen?", ["Ich habe eine Summe", "Ich habe eine Wunschrate"], horizontal=True)
-        
         c1, c2, c3 = st.columns(3)
-        
         amount_input = 0.0
         rate_input = 0.0
         
@@ -238,29 +291,21 @@ def main():
         if st.button("Rechnen", type="primary", key="btn_simple"):
             st.divider()
             col_res1, col_res2 = st.columns(2)
-            
             if calc_mode == "Ich habe eine Summe":
-                # Wir suchen die Rate
                 rate_res = FinancialMath.calculate_rate(amount_input, years_simple, interest_simple)
                 total_res = rate_res * years_simple * 12
                 interest_cost = total_res - amount_input
-                
                 col_res1.metric("Monatliche Rate", f"{rate_res:,.2f} €")
                 col_res2.metric("Gesamtkosten", f"{total_res:,.2f} €", delta=f"davon {interest_cost:,.2f} € Zinsen", delta_color="inverse")
             else:
-                # Wir suchen die Summe
                 loan_res = FinancialMath.calculate_max_loan(rate_input, years_simple, interest_simple)
                 total_res = rate_input * years_simple * 12
                 interest_cost = total_res - loan_res
-                
                 col_res1.metric("Mögliche Kreditsumme", f"{loan_res:,.2f} €")
                 col_res2.metric("Gesamtrückzahlung", f"{total_res:,.2f} €", delta=f"Kosten: {interest_cost:,.2f} €", delta_color="inverse")
 
-    # ---------------------------------------------------------
-    # TAB 2: PROFI BANK-CHECK (Die detaillierte Prüfung)
-    # ---------------------------------------------------------
     with tab_pro:
-        st.caption("Detaillierte Prüfung der Bonität und Haushaltsrechnung")
+        st.caption("Detaillierte Prüfung für: " + (project_name if project_name else "Unbenannt"))
         
         with st.expander("👤 1. Haushalt & Einkommen", expanded=True):
             col1, col2 = st.columns(2)
@@ -271,7 +316,6 @@ def main():
                 partner_income = col2.number_input("Netto Partner (€)", 0, step=50, key="p_part_inc")
                 st.success(f"Haushalts-Netto: {net_income + partner_income:,.2f} €")
             kids = st.slider("Kinder", 0, 5, 0, key="p_kids")
-            
             c3, c4 = st.columns(2)
             emp_status = c3.selectbox("Status", ["fest", "befristet", "probezeit", "selbststaendig"], key="p_stat")
             schufa = c4.toggle("Schufa sauber?", value=True, key="p_schufa")
@@ -289,11 +333,11 @@ def main():
             cw1, cw2, cw3 = st.columns(3)
             amount = cw1.number_input("Kreditsumme (€)", 50000, step=1000, key="p_amt")
             years = cw2.slider("Laufzeit (Jahre)", 1, 25, 10, key="p_yrs")
-            # NEU: Variabler Zins
-            base_interest = cw3.number_input("Basis-Zins aktuell (%)", value=4.0, step=0.1, help="Aktueller Marktzins, auf den Risikozuschläge addiert werden.")
+            base_interest = cw3.number_input("Basis-Zins aktuell (%)", value=4.0, step=0.1, key="base_interest")
 
         if st.button("Bonität prüfen", type="primary", key="btn_pro"):
             customer = CustomerData(
+                project_name=project_name if project_name else "Unbenannt",
                 net_income=net_income, partner_income=partner_income,
                 rental_income=rental, other_income=other_inc,
                 rent_warm=rent_warm, mortgage_payment=mortgage,
@@ -302,18 +346,15 @@ def main():
                 employment_status=emp_status, schufa_clean=schufa
             )
             
-            # Hier übergeben wir den variablen Zins an die Engine
             result = CreditDecisionEngine.calculate_loan(customer, amount, years*12, base_interest)
             
             st.divider()
             c_res1, c_res2 = st.columns([2, 1])
-            
             with c_res1:
-                # Wording angepasst
                 if result.approved:
                     st.subheader("✅ FINANZIERUNG MÖGLICH")
                     st.metric("Kalkulierte Rate", f"{result.monthly_rate:,.2f} €")
-                    st.caption(f"Zinssatz (Indikativ): {result.interest_rate}% (Basis {base_interest}% + Risiko)")
+                    st.caption(f"Zinssatz (Indikativ): {result.interest_rate}%")
                 else:
                     st.subheader("⚠️ KRITISCH / NICHT MÖGLICH")
                     st.error("Kriterien der Bank-Logik nicht erfüllt.")
@@ -322,8 +363,6 @@ def main():
                 st.write("**Budget-Check:**")
                 st.write(f"Frei: {result.disposable_income:,.2f} €")
                 st.write(f"DTI: {result.dti_ratio:.1f}%")
-                if result.dti_ratio > 40:
-                    st.caption("⚠️ Quote > 40%")
 
             if result.messages:
                 with st.container(border=True):
@@ -335,7 +374,7 @@ def main():
 
             pdf = BankPDF()
             pdf_data = pdf.create_report(result, customer, amount, years*12)
-            st.download_button("📄 Prüfprotokoll (PDF)", data=pdf_data, file_name="Finanzpruefung.pdf", mime="application/pdf")
+            st.download_button("📄 Prüfprotokoll (PDF)", data=pdf_data, file_name=f"Finanzpruefung_{project_name}.pdf", mime="application/pdf")
 
 if __name__ == "__main__":
     main()
