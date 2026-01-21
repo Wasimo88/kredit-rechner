@@ -72,8 +72,7 @@ class LoanResult:
     max_loan_amount: float
     monthly_rate: float
     interest_rate: float
-    # NEU: String, der erklärt wie der Zins zustande kommt
-    interest_details: str 
+    interest_details: str
     total_repayment: float
     messages: List[str] = field(default_factory=list)
     disposable_income: float = 0.0
@@ -127,10 +126,8 @@ class CreditDecisionEngine:
         messages = []
         ko_errors = CreditDecisionEngine.check_hard_knockouts(c, amount)
         if ko_errors:
-            # Leeres Ergebnis bei Fehler
             return LoanResult(False, 0, 0, 0, "", 0, ko_errors)
 
-        # ZINS LOGIK & ERKLÄRUNG
         interest_rate = base_interest
         details_list = [f"{base_interest}% Basis"]
         
@@ -155,7 +152,6 @@ class CreditDecisionEngine:
         interest_rate = round(interest_rate, 2)
         interest_details_str = " ".join(details_list)
         
-        # Berechnung
         rate = FinancialMath.calculate_rate(amount, months/12, interest_rate)
         rate = round(rate, 2)
         
@@ -179,7 +175,7 @@ class CreditDecisionEngine:
             max_loan_amount=amount,
             monthly_rate=rate,
             interest_rate=interest_rate,
-            interest_details=interest_details_str, # Hier übergeben wir den Erklärungstext
+            interest_details=interest_details_str,
             total_repayment=round(total_repay, 2),
             messages=messages,
             disposable_income=disposable,
@@ -247,7 +243,6 @@ class ProfessionalPDF(FPDF):
         self.chapter_row("Monatliche Rate:", f"{res.monthly_rate:,.2f} EUR")
         self.chapter_row("Indikativer Zinssatz (p.a.):", f"{res.interest_rate} %")
         
-        # NEU: Erklärung des Zinssatzes im PDF
         self.set_font('Helvetica', 'I', 9)
         self.set_text_color(80, 80, 80)
         self.cell(0, 6, f"Zusammensetzung: {res.interest_details}", 0, 1, 'R')
@@ -270,8 +265,10 @@ class ProfessionalPDF(FPDF):
         
         return bytes(self.output())
 
-# --- 3. SPEICHERN & LADEN ---
+# --- 3. SPEICHERN & LADEN (CALLBACKS) ---
+
 def get_session_data():
+    """Sammelt Daten für den Download"""
     data = {
         "project_name": st.session_state.get("project_name", ""),
         "p_net": st.session_state.get("p_net", 2500),
@@ -293,17 +290,18 @@ def get_session_data():
     }
     return json.dumps(data, indent=4)
 
-def load_session_data(uploaded_file):
+def import_callback():
+    """Wird ausgeführt, BEVOR die Seite neu lädt. Verhindert den Instanzierungs-Fehler."""
+    uploaded_file = st.session_state.get("upload_widget")
     if uploaded_file is not None:
         try:
             data = json.load(uploaded_file)
             for key, value in data.items():
                 st.session_state[key] = value
-            st.success("Daten importiert.")
-            time.sleep(0.5)
-            st.rerun()
+            # Hinweis im State speichern, damit er nach dem Rerun angezeigt wird
+            st.session_state["import_success"] = True
         except Exception as e:
-            st.error(f"Fehler: {e}")
+            st.session_state["import_error"] = str(e)
 
 # --- 4. UI HAUPTANWENDUNG ---
 def main():
@@ -312,6 +310,14 @@ def main():
     project_name = st.text_input("Name des Kunden / Projekts", key="project_name", placeholder="z.B. Familie Müller")
 
     tab_simple, tab_pro = st.tabs(["🔢 Schnellrechner", "🏦 Profi-Analyse"])
+
+    # Anzeige von Import-Nachrichten (nach Rerun)
+    if st.session_state.get("import_success"):
+        st.success("✅ Daten erfolgreich importiert!")
+        st.session_state["import_success"] = False # Reset
+    if st.session_state.get("import_error"):
+        st.error(f"❌ Fehler beim Import: {st.session_state['import_error']}")
+        st.session_state["import_error"] = None # Reset
 
     # TAB 1
     with tab_simple:
@@ -399,7 +405,6 @@ def main():
                     st.subheader("✅ FINANZIERUNG MÖGLICH")
                     st.metric("Monatliche Rate", f"{result.monthly_rate:,.2f} €")
                     
-                    # Zeigt jetzt auch in der App an, wie sich der Zins zusammensetzt
                     if use_scoring and result.interest_rate > base_interest:
                          st.caption(f"Indikativer Zins: {result.interest_rate}% ({result.interest_details})")
                     else:
@@ -452,12 +457,14 @@ def main():
         )
         
     with col_load:
-        uploaded_file = st.file_uploader("📂 Daten Laden", type=["json"], label_visibility="collapsed")
+        # HIER IST DER FIX: Key und Callback
+        uploaded_file = st.file_uploader("📂 Daten Laden", type=["json"], label_visibility="collapsed", key="upload_widget")
+        
+        # Der Button ruft jetzt die Callback-Funktion auf, BEVOR die Seite neu lädt
         if uploaded_file:
-            if st.button("⬆️ Importieren", use_container_width=True):
-                load_session_data(uploaded_file)
+             st.button("⬆️ Importieren", use_container_width=True, on_click=import_callback)
     
-    st.caption("Zum Speichern: 'Daten Speichern' klicken. Zum Laden: JSON-Datei auswählen und 'Importieren' klicken.")
+    st.caption("Zum Speichern: 'Daten Speichern' klicken Zum Laden: JSON-Datei auswählen und 'Importieren' klicken.")
 
     st.divider()
     if st.button("🔒 Abmelden"):
