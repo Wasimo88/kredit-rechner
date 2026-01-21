@@ -4,6 +4,32 @@ from dataclasses import dataclass, field
 from typing import List
 from fpdf import FPDF
 
+# ==========================================
+# 🔒 PASSWORD
+# ==========================================
+def check_password():
+    if "password_correct" not in st.session_state:
+        st.session_state.password_correct = None
+    if st.session_state.password_correct == True:
+        return True
+
+    def password_entered():
+        if st.session_state["password_input"] == st.secrets["password"]:
+            st.session_state.password_correct = True
+            del st.session_state["password_input"]
+        else:
+            st.session_state.password_correct = False
+
+    st.text_input("🔒 Passwort", type="password", on_change=password_entered, key="password_input")
+    if st.session_state.password_correct == False:
+        st.error("Falsches Passwort.")
+    return False
+
+if not check_password():
+    st.stop()
+
+#============================================
+
 # --- 1. KONFIGURATION & LOGIK ---
 
 class BankPolicy:
