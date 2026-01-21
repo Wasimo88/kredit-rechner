@@ -12,7 +12,6 @@ APP_NAME = "Finanz-Suite Pro"
 
 st.set_page_config(page_title=APP_NAME, page_icon="⚖️")
 
-# Passwort aus Secrets laden
 try:
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
 except Exception:
@@ -73,6 +72,8 @@ class LoanResult:
     max_loan_amount: float
     monthly_rate: float
     interest_rate: float
+    # NEU: String, der erklärt wie der Zins zustande kommt
+    interest_details: str 
     total_repayment: float
     messages: List[str] = field(default_factory=list)
     disposable_income: float = 0.0
@@ -126,22 +127,35 @@ class CreditDecisionEngine:
         messages = []
         ko_errors = CreditDecisionEngine.check_hard_knockouts(c, amount)
         if ko_errors:
-            return LoanResult(False, 0, 0, 0, 0, ko_errors)
+            # Leeres Ergebnis bei Fehler
+            return LoanResult(False, 0, 0, 0, "", 0, ko_errors)
 
-        # ZINS LOGIK MIT SCHALTER
+        # ZINS LOGIK & ERKLÄRUNG
         interest_rate = base_interest
+        details_list = [f"{base_interest}% Basis"]
         
         if use_scoring:
-            # Nur wenn Schalter AN ist, werden Aufschläge berechnet
-            if c.employment_status == "befristet": interest_rate += 1.5
-            if c.employment_status == "selbststaendig": interest_rate += 2.0
-            if months > 84: interest_rate += 0.5 
-            messages.append("Hinweis: Automatisches Bank-Scoring aktiv (Zinsaufschläge wurden berechnet).")
+            if c.employment_status == "befristet": 
+                interest_rate += 1.5
+                details_list.append("+ 1.5% (Befristet)")
+            if c.employment_status == "selbststaendig": 
+                interest_rate += 2.0
+                details_list.append("+ 2.0% (Selbstständig)")
+            if months > 84: 
+                interest_rate += 0.5 
+                details_list.append("+ 0.5% (Laufzeit > 7 J.)")
+            
+            if len(details_list) > 1:
+                messages.append("Scoring aktiv: Risikoaufschläge wurden berechnet.")
+            else:
+                messages.append("Scoring aktiv: Keine Aufschläge notwendig.")
         else:
-            messages.append("Hinweis: Fixer Zinssatz (Keine Risikoaufschläge).")
+            messages.append("Fixzins gewählt (Keine Risikoaufschläge).")
 
         interest_rate = round(interest_rate, 2)
+        interest_details_str = " ".join(details_list)
         
+        # Berechnung
         rate = FinancialMath.calculate_rate(amount, months/12, interest_rate)
         rate = round(rate, 2)
         
@@ -165,6 +179,7 @@ class CreditDecisionEngine:
             max_loan_amount=amount,
             monthly_rate=rate,
             interest_rate=interest_rate,
+            interest_details=interest_details_str, # Hier übergeben wir den Erklärungstext
             total_repayment=round(total_repay, 2),
             messages=messages,
             disposable_income=disposable,
@@ -231,6 +246,14 @@ class ProfessionalPDF(FPDF):
         self.chapter_title("2. ERMITTELTE KONDITIONEN")
         self.chapter_row("Monatliche Rate:", f"{res.monthly_rate:,.2f} EUR")
         self.chapter_row("Indikativer Zinssatz (p.a.):", f"{res.interest_rate} %")
+        
+        # NEU: Erklärung des Zinssatzes im PDF
+        self.set_font('Helvetica', 'I', 9)
+        self.set_text_color(80, 80, 80)
+        self.cell(0, 6, f"Zusammensetzung: {res.interest_details}", 0, 1, 'R')
+        self.set_text_color(0)
+        self.set_font('Helvetica', '', 11)
+        
         self.chapter_row("Gesamtrückzahlung:", f"{res.total_repayment:,.2f} EUR")
         self.ln(8)
         
@@ -266,7 +289,6 @@ def get_session_data():
         "p_amt": st.session_state.get("p_amt", 50000.0),
         "p_yrs": st.session_state.get("p_yrs", 10),
         "base_interest": st.session_state.get("base_interest", 4.0),
-        # Neuer Schalter Zustand
         "use_scoring": st.session_state.get("use_scoring", True)
     }
     return json.dumps(data, indent=4)
@@ -285,15 +307,13 @@ def load_session_data(uploaded_file):
 
 # --- 4. UI HAUPTANWENDUNG ---
 def main():
-    # --- HEADER ---
     st.title(f"💼 {APP_NAME}")
     
-    # Kundenname oben, damit es präsent ist
     project_name = st.text_input("Name des Kunden / Projekts", key="project_name", placeholder="z.B. Familie Müller")
 
     tab_simple, tab_pro = st.tabs(["🔢 Schnellrechner", "🏦 Profi-Analyse"])
 
-    # TAB 1: EINFACHER RECHNER
+    # TAB 1
     with tab_simple:
         st.subheader("Kredit-Schnellrechner")
         calc_mode = st.radio("Berechnungsmodus", ["Kreditrate berechnen (Summe gegeben)", "Kreditsumme berechnen (Rate gegeben)"])
@@ -323,7 +343,7 @@ def main():
                 col_res1.metric("Mögliche Kreditsumme", f"{loan_res:,.2f} €")
                 col_res2.metric("Gesamtrückzahlung", f"{total_res:,.2f} €", delta=f"Kosten: {total_res - loan_res:,.2f} €", delta_color="inverse")
 
-    # TAB 2: PROFI CHECK
+    # TAB 2
     with tab_pro:
         st.caption("Detaillierte Prüfung der Kapitaldienstfähigkeit")
         
@@ -357,7 +377,6 @@ def main():
             years = cw2.slider("Laufzeit (Jahre)", 1, 30, 10, key="p_yrs")
             base_interest = cw3.number_input("Basis-Zins (%)", value=4.0, step=0.1, key="base_interest")
             
-        # NEU: Schalter für Scoring
         use_scoring = st.toggle("Automatisches Bank-Scoring (Risikoaufschläge)", value=True, key="use_scoring", help="Wenn aktiv, werden Aufschläge für Laufzeit (>7 Jahre) oder Risikoberufe auf den Basis-Zins addiert.")
 
         if st.button("Prüfung starten", type="primary", key="btn_pro"):
@@ -371,7 +390,6 @@ def main():
                 employment_status=emp_status, schufa_clean=schufa_clean
             )
             
-            # Schalter-Wert übergeben
             result = CreditDecisionEngine.calculate_loan(customer, amount, years*12, base_interest, use_scoring)
             
             st.divider()
@@ -380,11 +398,13 @@ def main():
                 if result.approved:
                     st.subheader("✅ FINANZIERUNG MÖGLICH")
                     st.metric("Monatliche Rate", f"{result.monthly_rate:,.2f} €")
-                    # Dynamische Anzeige je nach Modus
-                    if use_scoring:
-                        st.caption(f"Indikativer Zinssatz: {result.interest_rate}% (Basis {base_interest}% + Risiko)")
+                    
+                    # Zeigt jetzt auch in der App an, wie sich der Zins zusammensetzt
+                    if use_scoring and result.interest_rate > base_interest:
+                         st.caption(f"Indikativer Zins: {result.interest_rate}% ({result.interest_details})")
                     else:
-                        st.caption(f"Fixer Zinssatz: {result.interest_rate}%")
+                         st.caption(f"Zinssatz: {result.interest_rate}% ({result.interest_details})")
+                         
                 else:
                     st.subheader("⚠️ NICHT MÖGLICH")
                     st.error("Die Kriterien für eine Kreditvergabe sind nicht erfüllt.")
@@ -419,7 +439,6 @@ def main():
     col_save, col_load = st.columns(2)
     
     with col_save:
-        # Dateiname Generieren
         clean_name = project_name.replace(" ", "_") if project_name else "Unbenannt"
         filename_base = f"{APP_NAME.replace(' ', '_')}_{clean_name}"
         json_data = get_session_data()
@@ -440,7 +459,6 @@ def main():
     
     st.caption("Zum Speichern: 'Daten Speichern' klicken. Zum Laden: JSON-Datei auswählen und 'Importieren' klicken.")
 
-    # LOGOUT GANZ UNTEN
     st.divider()
     if st.button("🔒 Abmelden"):
         st.session_state.logged_in = False
